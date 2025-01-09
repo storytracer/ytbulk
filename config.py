@@ -2,7 +2,7 @@ import os
 from typing import Dict, Optional
 from pathlib import Path
 from dotenv import load_dotenv
-from .resolutions import YTBulkResolution
+from resolutions import YTBulkResolution
 
 # Load .env files
 load_dotenv()

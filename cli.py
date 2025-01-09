@@ -5,9 +5,9 @@ from typing import List
 import aiofiles
 from tqdm import tqdm
 
-from .config import YTBulkConfig
-from .resolutions import YTBulkResolution
-from .download import YTBulkDownloader
+from config import YTBulkConfig
+from resolutions import YTBulkResolution
+from download import YTBulkDownloader
 
 class YTBulkCLI:
     """Command line interface for YTBulk."""
@@ -20,7 +20,7 @@ class YTBulkCLI:
 
 @click.command()
 @click.argument('id_file', type=click.Path(exists=True))
-@click.option('--work-dir', type=click.Path(required=True), help='Working directory for downloads')
+@click.option('--work-dir', type=click.Path(dir_okay=True), required=True, help='Working directory for downloads')
 @click.option('--bucket', required=True, help='S3 bucket name')
 @click.option('--max-resolution', 
               type=click.Choice([res.value for res in YTBulkResolution], case_sensitive=False),

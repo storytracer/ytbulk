@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Optional, List, Dict
 from tqdm import tqdm
 
-from .config import YTBulkConfig
-from .storage import YTBulkStorage
-from .resolutions import YTBulkResolution
+from config import YTBulkConfig
+from storage import YTBulkStorage
+from resolutions import YTBulkResolution
 
 @dataclass
 class VideoMetadata:
@@ -102,8 +102,12 @@ class YTBulkDownloader:
     ) -> None:
         """Process a list of video IDs concurrently."""
         # Get list of already processed videos
-        processed = await self.storage.list_processed_videos()
-        to_process = [vid for vid in video_ids if vid not in processed]
+        to_process = await self.storage.list_unprocessed_videos(
+            video_ids,
+            audio=download_audio,
+            video=download_video,
+            merged=merge
+        )
         
         if not to_process:
             logging.info("All videos already processed")
