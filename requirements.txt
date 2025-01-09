@@ -1,0 +1,6 @@
+aioboto3
+aiofiles
+aiohttp
+click
+python-dotenv
+tqdm
