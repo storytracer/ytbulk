@@ -3,6 +3,8 @@ import click
 from pathlib import Path
 from typing import List
 import aiofiles
+import csv
+import re
 from tqdm import tqdm
 
 from config import YTBulkConfig
@@ -11,15 +13,30 @@ from download import YTBulkDownloader
 
 class YTBulkCLI:
     """Command line interface for YTBulk."""
+    
+    @staticmethod
+    def is_valid_youtube_id(video_id: str) -> bool:
+        """Validate YouTube video ID format."""
+        return bool(re.match(r'^[A-Za-z0-9_-]{11}$', video_id))
 
     @staticmethod
-    async def read_video_ids(file_path: Path) -> List[str]:
-        """Read and validate video IDs from file."""
+    async def read_video_ids(file_path: Path, id_column: str) -> List[str]:
+        """Read and validate video IDs from CSV file."""
+        video_ids = []
         async with aiofiles.open(file_path) as f:
-            return [line.strip() for line in await f.readlines() if line.strip()]
+            content = await f.read()
+            reader = csv.DictReader(content.splitlines())
+            for row in reader:
+                if id_column in row and row[id_column].strip():
+                    video_id = row[id_column].strip()
+                    if YTBulkCLI.is_valid_youtube_id(video_id):
+                        video_ids.append(video_id)
+                    else:
+                        click.echo(f"Warning: Invalid YouTube ID format: {video_id}", err=True)
+        return video_ids
 
 @click.command()
-@click.argument('id_file', type=click.Path(exists=True))
+@click.argument('csv_file', type=click.Path(exists=True))
 @click.option('--work-dir', type=click.Path(dir_okay=True), required=True, help='Working directory for downloads')
 @click.option('--bucket', required=True, help='S3 bucket name')
 @click.option('--max-resolution', 
@@ -30,7 +47,7 @@ class YTBulkCLI:
 @click.option('--merge/--no-merge', default=True, help='Merge video and audio')
 @click.option('--max-concurrent', type=int, help='Maximum concurrent downloads')
 def main(
-    id_file: str,
+    csv_file: str,
     work_dir: str,
     bucket: str,
     max_resolution: str,
@@ -59,7 +76,7 @@ def main(
 
     async def run():
         # Read video IDs
-        video_ids = await YTBulkCLI.read_video_ids(Path(id_file))
+        video_ids = await YTBulkCLI.read_video_ids(Path(csv_file))
         total = len(video_ids)
         
         if total == 0:
