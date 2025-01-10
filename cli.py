@@ -10,6 +10,7 @@ from tqdm import tqdm
 from config import YTBulkConfig
 from resolutions import YTBulkResolution
 from download import YTBulkDownloader
+from proxies import YTBulkProxyManager
 
 class YTBulkCLI:
     """Command line interface for YTBulk."""
@@ -37,24 +38,30 @@ class YTBulkCLI:
 
 @click.command()
 @click.argument('csv_file', type=click.Path(exists=True))
+@click.argument('id_column', type=str)
 @click.option('--work-dir', type=click.Path(dir_okay=True), required=True, help='Working directory for downloads')
 @click.option('--bucket', required=True, help='S3 bucket name')
+@click.option('--proxy-file', type=click.Path(exists=True), required=True, help='File containing proxy URLs')
 @click.option('--max-resolution', 
               type=click.Choice([res.value for res in YTBulkResolution], case_sensitive=False),
               help='Maximum video resolution')
 @click.option('--video/--no-video', default=True, help='Download video')
 @click.option('--audio/--no-audio', default=True, help='Download audio')
 @click.option('--merge/--no-merge', default=True, help='Merge video and audio')
-@click.option('--max-concurrent', type=int, help='Maximum concurrent downloads')
+@click.option('--max-consecutive-failures', type=int, default=3, help='Maximum consecutive proxy failures')
+@click.option('--proxy-cooldown', type=int, default=30, help='Proxy cooldown time in minutes')
 def main(
     csv_file: str,
+    id_column: str,
     work_dir: str,
     bucket: str,
+    proxy_file: str,
     max_resolution: str,
     video: bool,
     audio: bool,
     merge: bool,
-    max_concurrent: int
+    max_consecutive_failures: int,
+    proxy_cooldown: int
 ):
     """Download YouTube videos from a file containing video IDs."""
     
@@ -63,20 +70,30 @@ def main(
     config.validate()
 
     # Override config with CLI options if provided
-    if max_concurrent:
-        config.max_concurrent = max_concurrent
     if max_resolution:
         config.default_resolution = YTBulkResolution(max_resolution)
 
+    # Initialize proxy manager
+    proxy_manager = YTBulkProxyManager(
+        config=config,
+        work_dir=Path(work_dir),
+        max_consecutive_failures=max_consecutive_failures,
+        cooldown_minutes=proxy_cooldown
+    )
+    
     downloader = YTBulkDownloader(
         config=config,
         work_dir=Path(work_dir),
-        bucket=bucket
+        bucket=bucket,
+        proxy_manager=proxy_manager
     )
 
     async def run():
+        # Load proxies
+        await proxy_manager.load_proxies()
+        
         # Read video IDs
-        video_ids = await YTBulkCLI.read_video_ids(Path(csv_file))
+        video_ids = await YTBulkCLI.read_video_ids(Path(csv_file), id_column)
         total = len(video_ids)
         
         if total == 0:

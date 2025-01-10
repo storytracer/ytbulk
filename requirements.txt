@@ -1,6 +1,7 @@
 aioboto3
 aiofiles
 aiohttp
+yt-dlp
 click
 python-dotenv
 tqdm
