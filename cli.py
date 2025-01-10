@@ -41,7 +41,6 @@ class YTBulkCLI:
 @click.argument('id_column', type=str)
 @click.option('--work-dir', type=click.Path(dir_okay=True), required=True, help='Working directory for downloads')
 @click.option('--bucket', required=True, help='S3 bucket name')
-@click.option('--proxy-file', type=click.Path(exists=True), required=True, help='File containing proxy URLs')
 @click.option('--max-resolution', 
               type=click.Choice([res.value for res in YTBulkResolution], case_sensitive=False),
               help='Maximum video resolution')
@@ -55,7 +54,6 @@ def main(
     id_column: str,
     work_dir: str,
     bucket: str,
-    proxy_file: str,
     max_resolution: str,
     video: bool,
     audio: bool,
@@ -89,8 +87,8 @@ def main(
     )
 
     async def run():
-        # Load proxies
-        await proxy_manager.load_proxies()
+        # Initialize proxy manager
+        await proxy_manager.initialize()
         
         # Read video IDs
         video_ids = await YTBulkCLI.read_video_ids(Path(csv_file), id_column)

@@ -21,7 +21,7 @@ class YTBulkConfig:
         self.proxy_max_failures = int(os.getenv("YTBULK_PROXY_MAX_FAILURES", 3))
         self.proxy_cooldown_minutes = int(os.getenv("YTBULK_PROXY_COOLDOWN", 30))
         self.proxy_test_video = os.getenv("YTBULK_PROXY_TEST_VIDEO", "PrRa-crR6tI")
-
+        self.proxy_list_url = os.getenv("YTBULK_PROXY_LIST_URL")  # Required
         
         # Download preferences
         self.default_resolution = YTBulkResolution(

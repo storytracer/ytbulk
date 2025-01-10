@@ -4,9 +4,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import List, Optional, Tuple
 from pathlib import Path
+import aiohttp
 import aiofiles
+import json
 import yt_dlp
 from yt_dlp.utils import ExtractorError
+
+from config import YTBulkConfig
 
 @dataclass
 class ProxyStatus:
@@ -27,23 +31,80 @@ class YTBulkProxyManager:
         max_consecutive_failures: int = 3,
         cooldown_minutes: int = 30
     ):
-        self.proxy_file = proxy_file
         self.work_dir = work_dir
+        self.proxy_list_url = config.proxy_list_url
+        self.proxy_state_file = work_dir / "cache" / "proxy_state.json"
         self.max_consecutive_failures = max_consecutive_failures
         self.cooldown_duration = timedelta(minutes=cooldown_minutes)
         self.proxies: List[ProxyStatus] = []
         self.current_proxy_index = 0
         self.test_video_id = config.proxy_test_video
 
-    async def load_proxies(self):
-        """Load proxies from file."""
-        async with aiofiles.open(self.proxy_file) as f:
-            proxy_list = [line.strip() for line in await f.readlines()]
-            self.proxies = [
-                ProxyStatus(url=url, last_used=datetime.min)
-                for url in proxy_list if url and not url.startswith('#')
-            ]
-        logging.info(f"Loaded {len(self.proxies)} proxies")
+    async def load_proxy_list(self) -> List[str]:
+        """Download current proxy list from URL."""
+        async with aiohttp.ClientSession() as session:
+            async with session.get(self.proxy_list_url) as response:
+                if response.status != 200:
+                    raise Exception(f"Failed to download proxy list: {response.status}")
+                content = await response.text()
+                return [line.strip() for line in content.splitlines() if line.strip()]
+
+    async def load_proxy_state(self):
+        """Load proxy state from persistent storage."""
+        if self.proxy_state_file.exists():
+            async with aiofiles.open(self.proxy_state_file, 'r') as f:
+                state_data = json.loads(await f.read())
+                
+                # Convert stored strings back to datetime objects
+                for proxy_data in state_data:
+                    if proxy_data.get('last_used'):
+                        proxy_data['last_used'] = datetime.fromisoformat(proxy_data['last_used'])
+                    if proxy_data.get('last_success'):
+                        proxy_data['last_success'] = datetime.fromisoformat(proxy_data['last_success'])
+                    if proxy_data.get('last_failure'):
+                        proxy_data['last_failure'] = datetime.fromisoformat(proxy_data['last_failure'])
+                    if proxy_data.get('cooldown_until'):
+                        proxy_data['cooldown_until'] = datetime.fromisoformat(proxy_data['cooldown_until'])
+                
+                return [ProxyStatus(**data) for data in state_data]
+        return []
+
+    async def save_proxy_state(self):
+        """Save current proxy state to persistent storage."""
+        state_data = [
+            {
+                'url': p.url,
+                'last_used': p.last_used.isoformat() if p.last_used else None,
+                'last_success': p.last_success.isoformat() if p.last_success else None,
+                'last_failure': p.last_failure.isoformat() if p.last_failure else None,
+                'consecutive_failures': p.consecutive_failures,
+                'is_blocked': p.is_blocked,
+                'cooldown_until': p.cooldown_until.isoformat() if p.cooldown_until else None
+            }
+            for p in self.proxies
+        ]
+        
+        async with aiofiles.open(self.proxy_state_file, 'w') as f:
+            await f.write(json.dumps(state_data, indent=2))
+
+    async def initialize(self):
+        """Initialize proxy manager with fresh list and stored state."""
+        # Load current proxy list
+        proxy_urls = await self.load_proxy_list()
+        
+        # Load stored state
+        stored_proxies = {p.url: p for p in await self.load_proxy_state()}
+        
+        # Create new proxy list combining stored state with current URLs
+        self.proxies = []
+        for url in proxy_urls:
+            if url in stored_proxies:
+                self.proxies.append(stored_proxies[url])
+            else:
+                self.proxies.append(ProxyStatus(url=url, last_used=datetime.min))
+        
+        logging.info(f"Initialized {len(self.proxies)} proxies")
+        await self.save_proxy_state()
 
     async def check_proxy(self, proxy_url: str) -> Tuple[bool, Optional[str]]:
         """
@@ -145,6 +206,7 @@ class YTBulkProxyManager:
                 proxy.consecutive_failures = 0
                 proxy.is_blocked = False
                 proxy.cooldown_until = None
+                asyncio.create_task(self.save_proxy_state())
                 break
 
     def mark_proxy_failure(self, proxy_url: str, error_type: str = None):
@@ -156,16 +218,12 @@ class YTBulkProxyManager:
                 proxy.last_used = now
                 proxy.consecutive_failures += 1
 
-                # Immediate block for certain error types
                 if error_type in {'blocked_403', 'blocked_bot'}:
                     proxy.is_blocked = True
                     proxy.cooldown_until = now + self.cooldown_duration
-                    logging.warning(f"Proxy {proxy_url} blocked due to {error_type}")
-                    return
-
-                # Progressive block for consecutive failures
-                if proxy.consecutive_failures >= self.max_consecutive_failures:
+                elif proxy.consecutive_failures >= self.max_consecutive_failures:
                     proxy.is_blocked = True
                     proxy.cooldown_until = now + self.cooldown_duration
-                    logging.warning(f"Proxy {proxy_url} blocked due to consecutive failures")
+
+                asyncio.create_task(self.save_proxy_state())
                 break

@@ -63,13 +63,14 @@ class YTBulkDownloader:
             ydl_opts = {
                 'format': format_str,
                 'proxy': proxy_url,
-                'outtmpl': str(self.storage.get_work_path('%(uploader_id)s', '%(id)s', '%(id)s.%(ext)s')),
+                'outtmpl': '%(id)s.%(ext)s',
                 'keepvideo': False,  # This ensures intermediate files are deleted
                 'retries': self.config.max_retries,
                 'quiet': True,
                 'no_warnings': True,
                 'extract_flat': False,
                 'writethumbnail': False,
+                'write_info_json': True,
                 'progress_hooks': [self._progress_hook] if self.progress_bar else []
             }
 
@@ -79,8 +80,8 @@ class YTBulkDownloader:
                 # Store metadata first
                 metadata = VideoMetadata(
                     video_id=video_id,
-                    channel_id=info.get('uploader_id', 'unknown'),
-                    title=info.get('title', 'unknown')
+                    channel_id=info.get('channel_id', ''),
+                    title=info.get('title', '')
                 )
                 await self.storage.save_metadata(metadata)
 
