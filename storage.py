@@ -17,6 +17,8 @@ class YTBulkStorage:
         self.bucket = bucket
         self.session = aioboto3.Session()
         self.downloads_prefix = "downloads"
+        self.downloads_dir = self.work_dir / self.downloads_prefix
+        self.downloads_dir.mkdir(parents=True, exist_ok=True)
     
     def get_metadata_filename(self, video_id: str) -> str:
         """Generate metadata filename."""
@@ -33,7 +35,7 @@ class YTBulkStorage:
     def get_work_path(self, channel_id: str, video_id: str, filename: str) -> Path:
         """Get path for temporary working files."""
         path = self.work_dir / self.downloads_prefix / channel_id / video_id / filename
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.mkdir(parents=True, exist_ok=True)
         return path
 
     def get_s3_key(self, channel_id: str, video_id: str, filename: str) -> str:
@@ -54,7 +56,7 @@ class YTBulkStorage:
             logging.error(f"Failed to list S3 objects: {e}")
             return set()
         
-    async def list_unprocessed_videos(self, video_ids: List[str], audio: bool, video: bool, merged: bool) -> List[str]:
+    async def list_unprocessed_videos(self, video_ids: List[str], audio: bool, video: bool) -> List[str]:
         """Return list of video IDs that don't have all required files in S3."""
         s3_files = await self.list_s3_files()
         s3_filenames = {Path(path).name for path in s3_files}
@@ -92,8 +94,12 @@ class YTBulkStorage:
             logging.error(f"Failed to save metadata: {e}")
             return False
 
-    async def finalize_video(self, channel_id: str, video_id: str) -> bool:
+    async def finalize_video(self, info_dict: dict) -> bool:
         """Upload processed files from work directory to S3."""
+        channel_id = info_dict.get('channel_id')
+        video_id = info_dict.get('id')
+        
+        # Use our path management method
         video_dir = self.get_work_path(channel_id, video_id, "")
         
         try:

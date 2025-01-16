@@ -11,6 +11,7 @@ from config import YTBulkConfig
 from resolutions import YTBulkResolution
 from download import YTBulkDownloader
 from proxies import YTBulkProxyManager
+from storage import YTBulkStorage
 
 class YTBulkCLI:
     """Command line interface for YTBulk."""
@@ -74,22 +75,21 @@ def main(
     # Initialize proxy manager
     proxy_manager = YTBulkProxyManager(
         config=config,
+        work_dir=Path(work_dir)
+    )
+    
+    storage_manager = YTBulkStorage(
         work_dir=Path(work_dir),
-        max_consecutive_failures=max_consecutive_failures,
-        cooldown_minutes=proxy_cooldown
+        bucket=bucket
     )
     
     downloader = YTBulkDownloader(
         config=config,
-        work_dir=Path(work_dir),
-        bucket=bucket,
-        proxy_manager=proxy_manager
+        proxy_manager=proxy_manager,
+        storage_manager=storage_manager
     )
 
     async def run():
-        # Initialize proxy manager
-        await proxy_manager.initialize()
-        
         # Read video IDs
         video_ids = await YTBulkCLI.read_video_ids(Path(csv_file), id_column)
         total = len(video_ids)
@@ -105,8 +105,7 @@ def main(
                 await downloader.process_video_list(
                     video_ids,
                     download_video=video,
-                    download_audio=audio,
-                    merge=merge
+                    download_audio=audio
                 )
             except Exception as e:
                 click.echo(f"\nError: {e}", err=True)

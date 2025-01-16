@@ -15,6 +15,7 @@ class YTBulkConfig:
         # Download settings
         self.chunk_size = int(os.getenv("YTBULK_CHUNK_SIZE", 1024 * 1024))
         self.max_retries = int(os.getenv("YTBULK_MAX_RETRIES", 3))
+        self.max_concurrent = int(os.getenv("YTBULK_MAX_CONCURRENT", 5))
         self.error_threshold = int(os.getenv("YTBULK_ERROR_THRESHOLD", 10))
         
         # Proxy settings

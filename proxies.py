@@ -1,44 +1,34 @@
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import List, Optional, Tuple
+from typing import Dict, Optional, List, Tuple
 from pathlib import Path
 import aiohttp
-import aiofiles
 import json
 import yt_dlp
 from yt_dlp.utils import ExtractorError
 
 from config import YTBulkConfig
+from storage import YTBulkStorage
 
 @dataclass
 class ProxyStatus:
-    """Proxy status tracking."""
+    """Simple proxy status tracking."""
     url: str
-    last_used: datetime
-    last_success: Optional[datetime] = None
-    last_failure: Optional[datetime] = None
-    consecutive_failures: int = 0
-    is_blocked: bool = False
-    cooldown_until: Optional[datetime] = None
+    is_good: bool = False
 
 class YTBulkProxyManager:
     def __init__(
         self,
         config: YTBulkConfig,
-        work_dir: Path,
-        max_consecutive_failures: int = 3,
-        cooldown_minutes: int = 30
+        work_dir: Path
     ):
         self.work_dir = work_dir
         self.proxy_list_url = config.proxy_list_url
-        self.proxy_state_file = work_dir / "cache" / "proxy_state.json"
-        self.max_consecutive_failures = max_consecutive_failures
-        self.cooldown_duration = timedelta(minutes=cooldown_minutes)
-        self.proxies: List[ProxyStatus] = []
-        self.current_proxy_index = 0
+        self.status_file = work_dir / "cache" / "proxies.json"
+        self.status_file.parent.mkdir(parents=True, exist_ok=True)
         self.test_video_id = config.proxy_test_video
+        self.current_good_proxy: Optional[str] = None
 
     async def load_proxy_list(self) -> List[str]:
         """Download current proxy list from URL."""
@@ -49,68 +39,20 @@ class YTBulkProxyManager:
                 content = await response.text()
                 return [line.strip() for line in content.splitlines() if line.strip()]
 
-    async def load_proxy_state(self):
-        """Load proxy state from persistent storage."""
-        if self.proxy_state_file.exists():
-            async with aiofiles.open(self.proxy_state_file, 'r') as f:
-                state_data = json.loads(await f.read())
-                
-                # Convert stored strings back to datetime objects
-                for proxy_data in state_data:
-                    if proxy_data.get('last_used'):
-                        proxy_data['last_used'] = datetime.fromisoformat(proxy_data['last_used'])
-                    if proxy_data.get('last_success'):
-                        proxy_data['last_success'] = datetime.fromisoformat(proxy_data['last_success'])
-                    if proxy_data.get('last_failure'):
-                        proxy_data['last_failure'] = datetime.fromisoformat(proxy_data['last_failure'])
-                    if proxy_data.get('cooldown_until'):
-                        proxy_data['cooldown_until'] = datetime.fromisoformat(proxy_data['cooldown_until'])
-                
-                return [ProxyStatus(**data) for data in state_data]
-        return []
+    def load_proxy_status(self) -> Dict[str, bool]:
+        """Load proxy status from JSON file."""
+        if self.status_file.exists():
+            with open(self.status_file) as f:
+                return json.load(f)
+        return {}
 
-    async def save_proxy_state(self):
-        """Save current proxy state to persistent storage."""
-        state_data = [
-            {
-                'url': p.url,
-                'last_used': p.last_used.isoformat() if p.last_used else None,
-                'last_success': p.last_success.isoformat() if p.last_success else None,
-                'last_failure': p.last_failure.isoformat() if p.last_failure else None,
-                'consecutive_failures': p.consecutive_failures,
-                'is_blocked': p.is_blocked,
-                'cooldown_until': p.cooldown_until.isoformat() if p.cooldown_until else None
-            }
-            for p in self.proxies
-        ]
-        
-        async with aiofiles.open(self.proxy_state_file, 'w') as f:
-            await f.write(json.dumps(state_data, indent=2))
+    def save_proxy_status(self, status: Dict[str, bool]):
+        """Save proxy status to JSON file."""
+        with open(self.status_file, 'w') as f:
+            json.dump(status, f, indent=2)
 
-    async def initialize(self):
-        """Initialize proxy manager with fresh list and stored state."""
-        # Load current proxy list
-        proxy_urls = await self.load_proxy_list()
-        
-        # Load stored state
-        stored_proxies = {p.url: p for p in await self.load_proxy_state()}
-        
-        # Create new proxy list combining stored state with current URLs
-        self.proxies = []
-        for url in proxy_urls:
-            if url in stored_proxies:
-                self.proxies.append(stored_proxies[url])
-            else:
-                self.proxies.append(ProxyStatus(url=url, last_used=datetime.min))
-        
-        logging.info(f"Initialized {len(self.proxies)} proxies")
-        await self.save_proxy_state()
-
-    async def check_proxy(self, proxy_url: str) -> Tuple[bool, Optional[str]]:
-        """
-        Check if proxy works with YouTube by attempting a download.
-        Returns (success, error_type).
-        """
+    async def test_proxy(self, proxy_url: str) -> bool:
+        """Test if proxy works with YouTube."""
         test_dir = self.work_dir / "proxy_test"
         test_dir.mkdir(parents=True, exist_ok=True)
 
@@ -120,42 +62,18 @@ class YTBulkProxyManager:
             'proxy': proxy_url,
             'format': 'worst',
             'outtmpl': str(test_dir / '%(id)s.%(ext)s'),
-            'progress_hooks': [],
         }
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([f'https://www.youtube.com/watch?v={self.test_video_id}'])
-                return True, None
-
-        except ExtractorError as e:
-            error_str = str(e.orig_msg).lower()
-            
-            # Check for specific blocking patterns
-            if "http error 403: forbidden" in error_str or "unable to download video data: http error 403" in error_str:
-                logging.warning(f"Proxy {proxy_url} blocked (HTTP 403)")
-                return False, "blocked_403"
-
-            if any(indicator in error_str for indicator in [
-                "confirm you're not a bot",
-                "sign in to confirm"
-            ]):
-                logging.warning(f"Proxy {proxy_url} blocked (bot detection)")
-                return False, "blocked_bot"
-
-            if "unable to download" in error_str and "403" not in error_str:
-                logging.debug(f"Proxy {proxy_url} connection failed: {error_str}")
-                return False, "connection_failed"
-
-            logging.warning(f"Extraction error with proxy {proxy_url}: {error_str}")
-            return False, "extractor_error"
+                return True
 
         except Exception as e:
-            logging.error(f"Unexpected error checking proxy {proxy_url}: {e}")
-            return False, "error"
+            logging.debug(f"Proxy test failed for {proxy_url}: {str(e)}")
+            return False
 
         finally:
-            # Clean up test files
             if test_dir.exists():
                 for file in test_dir.glob('*'):
                     try:
@@ -167,63 +85,87 @@ class YTBulkProxyManager:
                 except Exception:
                     pass
 
-    def get_next_proxy(self) -> Optional[str]:
-        """Get next available proxy."""
-        start_idx = self.current_proxy_index
-        
+    async def download_with_proxy(
+        self, 
+        video_id: str, 
+        ydl_opts: dict,
+        storage_manager: YTBulkStorage
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Attempt to download using a working proxy.
+        Returns (success, proxy_url used).
+        """
         while True:
-            proxy = self.proxies[self.current_proxy_index]
-            now = datetime.now()
-            
-            # Skip blocked proxies that haven't cooled down
-            if proxy.is_blocked and proxy.cooldown_until:
-                if now >= proxy.cooldown_until:
-                    # Proxy has cooled down, verify it
-                    success, error_type = asyncio.run(self.check_proxy(proxy.url))
-                    if success:
-                        proxy.is_blocked = False
-                        proxy.consecutive_failures = 0
-                        proxy.cooldown_until = None
-                        return proxy.url
+            proxy_url = await self.get_working_proxy()
+            if not proxy_url:
+                logging.error("No working proxies available")
+                return False, None
+
+            # Add proxy to options
+            ydl_opts['proxy'] = proxy_url
+
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    # Try the download
+                    info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=True)
+                    if not info:
+                        raise Exception("Download failed")
+                    
+                    # Finalize the video if download was successful
+                    if await storage_manager.finalize_video(info):
+                        return True, proxy_url
                     else:
-                        # Still blocked, extend cooldown
-                        proxy.cooldown_until = now + self.cooldown_duration
-                
-                # Move to next proxy
-                self.current_proxy_index = (self.current_proxy_index + 1) % len(self.proxies)
-                if self.current_proxy_index == start_idx:
-                    return None
-                continue
-            
-            return proxy.url
+                        return False, proxy_url
 
-    def mark_proxy_success(self, proxy_url: str):
-        """Mark a proxy as successfully used."""
-        for proxy in self.proxies:
-            if proxy.url == proxy_url:
-                proxy.last_success = datetime.now()
-                proxy.last_used = datetime.now()
-                proxy.consecutive_failures = 0
-                proxy.is_blocked = False
-                proxy.cooldown_until = None
-                asyncio.create_task(self.save_proxy_state())
-                break
+            except yt_dlp.utils.ExtractorError as e:
+                error_str = str(e).lower()
+                if "sign in to confirm" in error_str:
+                    self.mark_proxy_bad(proxy_url)
+                else:
+                    # Other extractor errors might not be proxy-related
+                    return False, proxy_url
 
-    def mark_proxy_failure(self, proxy_url: str, error_type: str = None):
-        """Mark a proxy as failed with specific error type."""
-        for proxy in self.proxies:
-            if proxy.url == proxy_url:
-                now = datetime.now()
-                proxy.last_failure = now
-                proxy.last_used = now
-                proxy.consecutive_failures += 1
+            except Exception as e:
+                logging.error(f"Download error: {e}")
+                return False, proxy_url
 
-                if error_type in {'blocked_403', 'blocked_bot'}:
-                    proxy.is_blocked = True
-                    proxy.cooldown_until = now + self.cooldown_duration
-                elif proxy.consecutive_failures >= self.max_consecutive_failures:
-                    proxy.is_blocked = True
-                    proxy.cooldown_until = now + self.cooldown_duration
+    async def get_working_proxy(self) -> Optional[str]:
+        """Get a working proxy to use."""
+        # If we have a current good proxy, use it
+        if self.current_good_proxy:
+            return self.current_good_proxy
 
-                asyncio.create_task(self.save_proxy_state())
-                break
+        # Load current status
+        status = self.load_proxy_status()
+        
+        # Try previously good proxies first
+        good_proxies = [url for url, is_good in status.items() if is_good]
+        for proxy in good_proxies:
+            if await self.test_proxy(proxy):
+                self.current_good_proxy = proxy
+                return proxy
+            else:
+                status[proxy] = False
+
+        # Try proxies from the proxy list
+        proxy_list = await self.load_proxy_list()
+        for proxy in proxy_list:
+            if proxy not in status and await self.test_proxy(proxy):
+                status[proxy] = True
+                self.current_good_proxy = proxy
+                self.save_proxy_status(status)
+                return proxy
+            status[proxy] = False
+
+        # No working proxy found
+        self.save_proxy_status(status)
+        return None
+
+    def mark_proxy_bad(self, proxy_url: str):
+        """Mark a proxy as bad in the status file."""
+        if proxy_url == self.current_good_proxy:
+            self.current_good_proxy = None
+        
+        status = self.load_proxy_status()
+        status[proxy_url] = False
+        self.save_proxy_status(status)
