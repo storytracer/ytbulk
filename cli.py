@@ -1,4 +1,6 @@
 import asyncio
+import logging
+from logging.handlers import RotatingFileHandler
 import click
 from pathlib import Path
 from typing import List
@@ -34,8 +36,30 @@ class YTBulkCLI:
                     if YTBulkCLI.is_valid_youtube_id(video_id):
                         video_ids.append(video_id)
                     else:
-                        click.echo(f"Warning: Invalid YouTube ID format: {video_id}", err=True)
+                        logging.warning(f"Invalid YouTube ID format: {video_id}")
         return video_ids
+
+def setup_logging(work_dir: str):
+    """Set up logging to a file in the log subdirectory."""
+    log_dir = Path(work_dir) / "log"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "ytbulk.log"
+    
+    # Create rotating file handler
+    handler = RotatingFileHandler(
+        log_file, maxBytes=5 * 1024 * 1024, backupCount=3
+    )  # 5 MB per file, 3 backups
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    handler.setFormatter(formatter)
+
+    # Configure root logger
+    logging.basicConfig(
+        level=logging.INFO,
+        handlers=[handler],
+    )
+    logging.info("Logging initialized")
 
 @click.command()
 @click.argument('csv_file', type=click.Path(exists=True))
@@ -64,6 +88,9 @@ def main(
 ):
     """Download YouTube videos from a file containing video IDs."""
     
+    # Set up logging
+    setup_logging(work_dir)
+
     # Load and validate configuration
     config = YTBulkConfig()
     config.validate()
@@ -90,32 +117,36 @@ def main(
     )
 
     async def run():
+        # Initialize proxy manager first
+        await proxy_manager.initialize()
+        
         # Read video IDs
         video_ids = await YTBulkCLI.read_video_ids(Path(csv_file), id_column)
         total = len(video_ids)
         
         if total == 0:
+            logging.warning("No video IDs found in input file")
             click.echo("No video IDs found in input file", err=True)
             return
 
-        # Initialize progress bar
-        with tqdm(total=total, desc="Processing videos") as pbar:
-            downloader.progress_bar = pbar
-            try:
-                await downloader.process_video_list(
-                    video_ids,
-                    download_video=video,
-                    download_audio=audio
-                )
-            except Exception as e:
-                click.echo(f"\nError: {e}", err=True)
-                raise
+        try:
+            await downloader.process_video_list(
+                video_ids,
+                download_video=video,
+                download_audio=audio
+            )
+        except Exception as e:
+            logging.error(f"Error during download: {e}")
+            click.echo(f"\nError: {e}", err=True)
+            raise
 
     try:
         asyncio.run(run())
     except KeyboardInterrupt:
+        logging.info("Download interrupted by user")
         click.echo("\nDownload interrupted by user")
     except Exception as e:
+        logging.critical(f"Fatal error: {e}")
         click.echo(f"\nFatal error: {e}", err=True)
         exit(1)
 

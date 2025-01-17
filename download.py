@@ -1,11 +1,9 @@
 import logging
 import asyncio
-
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List
 from tqdm import tqdm
-
 
 from config import YTBulkConfig
 from storage import YTBulkStorage
@@ -32,6 +30,7 @@ class YTBulkDownloader:
         self.storage = storage_manager
         self.proxy_manager = proxy_manager
         self.progress_bar = None
+        self.download_lock = asyncio.Lock()
 
     async def process_video(
         self,
@@ -57,8 +56,7 @@ class YTBulkDownloader:
                 'no_warnings': True,
                 'extract_flat': False,
                 'writethumbnail': False,
-                'writeinfojson': True,
-                'writesubtitles': True,
+                'writeinfojson': True
             }
 
             success, _ = await self.proxy_manager.download_with_proxy(
@@ -73,13 +71,16 @@ class YTBulkDownloader:
             return False
 
     async def process_video_list(self, video_ids: List[str], **kwargs) -> None:
-        """Process videos with controlled concurrency."""
+        """Process videos with true concurrency."""
         total_videos = len(video_ids)
         
         # Initialize progress bar
         progress_bar = tqdm(total=total_videos, desc="Processing videos")
         
         try:
+            # Initialize proxy manager
+            await self.proxy_manager.initialize()
+            
             # Get list of already processed videos
             to_process = await self.storage.list_unprocessed_videos(
                 video_ids,
@@ -96,68 +97,61 @@ class YTBulkDownloader:
 
             logging.info(f"Found {len(to_process)} videos to process out of {total_videos} total")
             
-            # Create semaphore for concurrency control
-            semaphore = asyncio.Semaphore(self.config.max_concurrent)
-            failed_consecutive = 0
-            should_stop = False
-            
-            async def process_with_semaphore(video_id: str):
-                nonlocal failed_consecutive, should_stop
-                
-                if should_stop:
-                    return False
-                    
-                async with semaphore:
+            failure_count = 0
+            queue = asyncio.Queue()
+            for vid in to_process:
+                await queue.put(vid)
+
+            async def worker():
+                nonlocal failure_count
+                while True:
                     try:
+                        video_id = await queue.get()
                         success = await self.process_video(video_id, **kwargs)
-                        if success:
-                            failed_consecutive = 0
-                            progress_bar.update(1)
-                        else:
-                            failed_consecutive += 1
-                            if failed_consecutive >= self.config.error_threshold:
-                                should_stop = True
-                                logging.error(f"Too many consecutive failures ({failed_consecutive})")
-                                raise asyncio.CancelledError("Error threshold reached")
-                        return success
-                    except asyncio.CancelledError:
-                        logging.debug(f"Cancelling download of {video_id}")
-                        raise
-                    except Exception as e:
-                        logging.error(f"Error processing {video_id}: {e}")
-                        return False
-
-            async def shutdown(tasks):
-                """Gracefully shutdown running tasks."""
-                for task in tasks:
-                    if not task.done():
-                        task.cancel()
-                
-                if tasks:
-                    logging.info("Waiting for running downloads to finish...")
-                    await asyncio.gather(*tasks, return_exceptions=True)
-
-            # Create and track tasks
-            tasks = [asyncio.create_task(process_with_semaphore(vid)) for vid in to_process]
-            
-            try:
-                # Wait for all tasks or until cancellation
-                await asyncio.gather(*tasks)
-                
-            except asyncio.CancelledError:
-                logging.info("\nReceived cancellation request, shutting down...")
-                await shutdown(tasks)
-                raise
-                
-            except KeyboardInterrupt:
-                logging.info("\nReceived keyboard interrupt, shutting down...")
-                await shutdown(tasks)
-                raise
-                
-            except Exception as e:
-                logging.error(f"Unexpected error: {e}")
-                await shutdown(tasks)
-                raise
                         
+                        async with self.download_lock:
+                            if success:
+                                failure_count = 0
+                                progress_bar.update(1)
+                            else:
+                                failure_count += 1
+                                if failure_count >= self.config.error_threshold:
+                                    logging.error(f"Error threshold reached ({failure_count})")
+                                    return
+                        
+                        queue.task_done()
+                        
+                        if failure_count >= self.config.error_threshold:
+                            return
+                            
+                    except asyncio.CancelledError:
+                        break
+                    except Exception as e:
+                        logging.error(f"Worker error: {e}")
+                        queue.task_done()
+
+            # Create workers
+            workers = []
+            for _ in range(self.config.max_concurrent):
+                task = asyncio.create_task(worker())
+                workers.append(task)
+
+            # Wait for queue to be processed
+            await queue.join()
+
+            # Cancel workers
+            for task in workers:
+                task.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+
+        except asyncio.CancelledError:
+            logging.info("\nReceived cancellation request")
+            raise
+        except KeyboardInterrupt:
+            logging.info("\nReceived keyboard interrupt")
+            raise
+        except Exception as e:
+            logging.error(f"Unexpected error: {e}")
+            raise
         finally:
             progress_bar.close()
