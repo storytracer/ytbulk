@@ -68,12 +68,11 @@ def process_video_with_progress(video_id: str, downloader: YTBulkDownloader,
             download_audio=download_audio
         )
         with progress_lock:
-            progress_bar.update(1)
+            if success:
+                progress_bar.update(1)
         return success
     except Exception as e:
         logging.error(f"Error processing video {video_id}: {e}")
-        with progress_lock:
-            progress_bar.update(1)
         return False
 
 @click.command()
@@ -149,7 +148,7 @@ def main(
         # Create progress bar and lock
         progress_bar = tqdm(total=total, 
                           initial=already_processed, 
-                          desc="Processing videos",
+                          desc="Downloading videos",
                           unit="video")
         progress_lock = Lock()
 
