@@ -7,13 +7,20 @@ from typing import List
 import aiofiles
 import csv
 import re
-from tqdm import tqdm
+import logging
 
 from config import YTBulkConfig
 from resolutions import YTBulkResolution
 from download import YTBulkDownloader
 from proxies import YTBulkProxyManager
 from storage import YTBulkStorage
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
 
 class YTBulkCLI:
     """Command line interface for YTBulk."""
@@ -71,9 +78,6 @@ def setup_logging(work_dir: str):
               help='Maximum video resolution')
 @click.option('--video/--no-video', default=True, help='Download video')
 @click.option('--audio/--no-audio', default=True, help='Download audio')
-@click.option('--merge/--no-merge', default=True, help='Merge video and audio')
-@click.option('--max-consecutive-failures', type=int, default=3, help='Maximum consecutive proxy failures')
-@click.option('--proxy-cooldown', type=int, default=30, help='Proxy cooldown time in minutes')
 def main(
     csv_file: str,
     id_column: str,
@@ -81,10 +85,7 @@ def main(
     bucket: str,
     max_resolution: str,
     video: bool,
-    audio: bool,
-    merge: bool,
-    max_consecutive_failures: int,
-    proxy_cooldown: int
+    audio: bool
 ):
     """Download YouTube videos from a file containing video IDs."""
     
@@ -102,7 +103,8 @@ def main(
     # Initialize proxy manager
     proxy_manager = YTBulkProxyManager(
         config=config,
-        work_dir=Path(work_dir)
+        work_dir=Path(work_dir),
+        max_concurrent_requests=config.max_concurrent
     )
     
     storage_manager = YTBulkStorage(
@@ -136,7 +138,6 @@ def main(
                 download_audio=audio
             )
         except Exception as e:
-            logging.error(f"Error during download: {e}")
             click.echo(f"\nError: {e}", err=True)
             raise
 

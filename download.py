@@ -75,7 +75,6 @@ class YTBulkDownloader:
         total_videos = len(video_ids)
         
         # Initialize progress bar
-        progress_bar = tqdm(total=total_videos, desc="Processing videos")
         
         try:
             # Initialize proxy manager
@@ -89,7 +88,8 @@ class YTBulkDownloader:
             )
             
             already_processed = total_videos - len(to_process)
-            progress_bar.update(already_processed)
+            
+            progress_bar = tqdm(total=total_videos, initial=already_processed, desc="Processing videos")
 
             if not to_process:
                 logging.info("All videos already processed")
