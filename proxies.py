@@ -27,7 +27,7 @@ class YTBulkProxyManager:
         self.work_dir = work_dir
         self.proxy_list_url = config.proxy_list_url
         self.status_file = work_dir / "cache" / "proxies.json"
-        self.test_video_id = config.proxy_test_video
+        self.test_video_id = "pv3dXznztvU"
         self.max_concurrent_requests = max_concurrent_requests
 
         self.status_file.parent.mkdir(parents=True, exist_ok=True)

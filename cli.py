@@ -119,9 +119,6 @@ def main(
     )
 
     async def run():
-        # Initialize proxy manager first
-        await proxy_manager.initialize()
-        
         # Read video IDs
         video_ids = await YTBulkCLI.read_video_ids(Path(csv_file), id_column)
         total = len(video_ids)

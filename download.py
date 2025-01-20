@@ -77,9 +77,6 @@ class YTBulkDownloader:
         # Initialize progress bar
         
         try:
-            # Initialize proxy manager
-            await self.proxy_manager.initialize()
-            
             # Get list of already processed videos
             to_process = await self.storage.list_unprocessed_videos(
                 video_ids,

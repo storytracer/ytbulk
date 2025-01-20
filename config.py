@@ -17,6 +17,7 @@ class YTBulkConfig:
         self.max_retries = int(os.getenv("YTBULK_MAX_RETRIES", 3))
         self.max_concurrent = int(os.getenv("YTBULK_MAX_CONCURRENT", 5))
         self.error_threshold = int(os.getenv("YTBULK_ERROR_THRESHOLD", 10))
+        self.test_video = os.getenv("YTBULK_TEST_VIDEO")  # Required
         
         # Proxy settings
         self.proxy_max_failures = int(os.getenv("YTBULK_PROXY_MAX_FAILURES", 3))
