@@ -2,8 +2,9 @@
 import json
 import logging
 import time
+import random
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
 from dataclasses import dataclass
 import requests
 import yt_dlp
@@ -30,29 +31,39 @@ class YTBulkProxyManager:
         self.proxy_lock = Lock()
 
         self.status_file.parent.mkdir(parents=True, exist_ok=True)
-        self.good_proxies: List[str] = []
-        self.bad_proxies: List[str] = []
-        self.proxy_list: List[str] = []
+        self.good_proxies: Set[str] = set()
+        self.bad_proxies: Set[str] = set()
+        self.untested_proxies: Set[str] = set()
 
         self.initialize_proxies()
 
     def initialize_proxies(self):
-        """Load and test the required number of proxies."""
-        self.proxy_list = self._load_proxy_list()
-        status = self._load_proxy_status()
+        """Load and test initial set of proxies."""
+        with self.proxy_lock:
+            self.untested_proxies = set(self._load_proxy_list())
+            status = self._load_proxy_status()
 
-        for proxy in self.proxy_list:
-            if len(self.good_proxies) >= self.max_concurrent_requests:
-                break
-            if proxy not in status:
+            # Initialize sets based on previous status
+            for proxy, proxy_status in status.items():
+                if proxy in self.untested_proxies:
+                    self.untested_proxies.remove(proxy)
+                    if proxy_status["is_good"]:
+                        self.good_proxies.add(proxy)
+                    else:
+                        self.bad_proxies.add(proxy)
+
+            # Test some random proxies if we need more good ones
+            while len(self.good_proxies) < self.max_concurrent_requests and self.untested_proxies:
+                proxy = random.choice(list(self.untested_proxies))
+                self.untested_proxies.remove(proxy)
+                
                 status[proxy] = self._test_and_save_status(proxy)
+                if status[proxy]["is_good"]:
+                    self.good_proxies.add(proxy)
+                else:
+                    self.bad_proxies.add(proxy)
 
-            if status[proxy]["is_good"]:
-                self.good_proxies.append(proxy)
-            else:
-                self.bad_proxies.append(proxy)
-
-        self._save_proxy_status(status)
+            self._save_proxy_status(status)
 
     def _load_proxy_list(self) -> List[str]:
         """Fetch the proxy list from the remote URL."""
@@ -74,27 +85,37 @@ class YTBulkProxyManager:
             json.dump(status, f, indent=2)
 
     def get_working_proxy(self) -> Optional[str]:
-        """Return the next available good proxy, testing more if needed."""
+        """Return a randomly selected good proxy, testing more if needed."""
         with self.proxy_lock:
-            while not self.good_proxies:
-                logging.info("No good proxies available. Testing more...")
+            while not self.good_proxies and (self.untested_proxies or self.bad_proxies):
+                logging.info("Testing more proxies...")
                 status = self._load_proxy_status()
 
-                for proxy in self.proxy_list:
-                    if proxy not in status or not status[proxy]["is_good"]:
-                        status[proxy] = self._test_and_save_status(proxy)
+                # Try untested proxies first
+                if self.untested_proxies:
+                    proxy = random.choice(list(self.untested_proxies))
+                    self.untested_proxies.remove(proxy)
+                # Retry some bad proxies occasionally
+                elif random.random() < 0.2:  # 20% chance to retry a bad proxy
+                    proxy = random.choice(list(self.bad_proxies))
+                    self.bad_proxies.remove(proxy)
+                else:
+                    continue
 
-                        if status[proxy]["is_good"]:
-                            self.good_proxies.append(proxy)
-                            break
+                status[proxy] = self._test_and_save_status(proxy)
+                if status[proxy]["is_good"]:
+                    self.good_proxies.add(proxy)
+                else:
+                    self.bad_proxies.add(proxy)
 
                 self._save_proxy_status(status)
 
-                if not self.good_proxies:
-                    logging.error("No good proxies found after testing.")
-                    return None
+            if not self.good_proxies:
+                logging.error("No working proxies available.")
+                return None
 
-            return self.good_proxies[0]
+            # Randomly select a good proxy
+            return random.choice(list(self.good_proxies))
 
     def _test_and_save_status(self, proxy_url: str) -> Dict[str, Optional[float]]:
         """Test a proxy and return its status."""
@@ -158,7 +179,7 @@ class YTBulkProxyManager:
     def download_with_proxy(
         self, video_id: str, ydl_opts: dict, storage_manager: YTBulkStorage
     ) -> Tuple[bool, Optional[str]]:
-        """Attempt to download using a working proxy."""
+        """Attempt to download using a randomly selected working proxy."""
         while True:
             proxy_url = self.get_working_proxy()
             if not proxy_url:
@@ -190,7 +211,5 @@ class YTBulkProxyManager:
             status = self._load_proxy_status()
             status[proxy_url] = {"is_good": False, "download_speed": None}
             self._save_proxy_status(status)
-            if proxy_url in self.good_proxies:
-                self.good_proxies.remove(proxy_url)
-            if proxy_url not in self.bad_proxies:
-                self.bad_proxies.append(proxy_url)
+            self.good_proxies.discard(proxy_url)
+            self.bad_proxies.add(proxy_url)
