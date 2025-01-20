@@ -1,3 +1,4 @@
+# __init__.py
 from cli import YTBulkCLI
 from config import YTBulkConfig
 from resolutions import YTBulkResolution
