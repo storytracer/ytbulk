@@ -1,6 +1,3 @@
-aioboto3
-aiofiles
-aiohttp
 yt-dlp[default]
 click
 python-dotenv
