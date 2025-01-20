@@ -55,7 +55,8 @@ class YTBulkDownloader:
                 'no_warnings': True,
                 'extract_flat': False,
                 'writethumbnail': False,
-                'writeinfojson': True
+                'writeinfojson': True,
+                'noprogress': True
             }
 
             success, _ = self.proxy_manager.download_with_proxy(

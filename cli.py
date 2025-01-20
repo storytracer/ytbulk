@@ -18,7 +18,7 @@ from proxies import YTBulkProxyManager
 from storage import YTBulkStorage
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.ERROR,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler()]
 )
@@ -147,8 +147,8 @@ def main(
         logging.info(f"Found {len(to_process)} videos to process out of {total} total")
 
         # Create progress bar and lock
-        progress_bar = tqdm(total=len(to_process), 
-                          initial=0, 
+        progress_bar = tqdm(total=total, 
+                          initial=already_processed, 
                           desc="Processing videos",
                           unit="video")
         progress_lock = Lock()
