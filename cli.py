@@ -1,14 +1,15 @@
 # cli.py
-import asyncio
 import logging
-from logging.handlers import RotatingFileHandler
+
 import click
 from pathlib import Path
 from typing import List
-import aiofiles
 import csv
 import re
-import logging
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from threading import Lock
+from tqdm import tqdm
 
 from config import YTBulkConfig
 from resolutions import YTBulkResolution
@@ -32,12 +33,11 @@ class YTBulkCLI:
         return bool(re.match(r'^[A-Za-z0-9_-]{11}$', video_id))
 
     @staticmethod
-    async def read_video_ids(file_path: Path, id_column: str) -> List[str]:
+    def read_video_ids(file_path: Path, id_column: str) -> List[str]:
         """Read and validate video IDs from CSV file."""
         video_ids = []
-        async with aiofiles.open(file_path) as f:
-            content = await f.read()
-            reader = csv.DictReader(content.splitlines())
+        with open(file_path) as f:
+            reader = csv.DictReader(f)
             for row in reader:
                 if id_column in row and row[id_column].strip():
                     video_id = row[id_column].strip()
@@ -47,27 +47,34 @@ class YTBulkCLI:
                         logging.warning(f"Invalid YouTube ID format: {video_id}")
         return video_ids
 
-def setup_logging(work_dir: str):
-    """Set up logging to a file in the log subdirectory."""
-    log_dir = Path(work_dir) / "log"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / "ytbulk.log"
-    
-    # Create rotating file handler
-    handler = RotatingFileHandler(
-        log_file, maxBytes=5 * 1024 * 1024, backupCount=3
-    )  # 5 MB per file, 3 backups
-    formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    handler.setFormatter(formatter)
-
-    # Configure root logger
+def setup_logging():
+    """Set up basic logging configuration."""
     logging.basicConfig(
         level=logging.INFO,
-        handlers=[handler],
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[logging.StreamHandler()]
     )
     logging.info("Logging initialized")
+
+def process_video_with_progress(video_id: str, downloader: YTBulkDownloader, 
+                              progress_bar: tqdm, progress_lock: Lock,
+                              download_video: bool = True, 
+                              download_audio: bool = True) -> bool:
+    """Process a single video and update progress bar."""
+    try:
+        success = downloader.process_video(
+            video_id,
+            download_video=download_video,
+            download_audio=download_audio
+        )
+        with progress_lock:
+            progress_bar.update(1)
+        return success
+    except Exception as e:
+        logging.error(f"Error processing video {video_id}: {e}")
+        with progress_lock:
+            progress_bar.update(1)
+        return False
 
 @click.command()
 @click.argument('csv_file', type=click.Path(exists=True))
@@ -90,18 +97,13 @@ def main(
 ):
     """Download YouTube videos from a file containing video IDs."""
     
-    # Set up logging
-    setup_logging(work_dir)
-
-    # Load and validate configuration
+    setup_logging()
     config = YTBulkConfig()
     config.validate()
 
-    # Override config with CLI options if provided
     if max_resolution:
         config.default_resolution = YTBulkResolution(max_resolution)
 
-    # Initialize proxy manager
     proxy_manager = YTBulkProxyManager(
         config=config,
         work_dir=Path(work_dir),
@@ -119,9 +121,9 @@ def main(
         storage_manager=storage_manager
     )
 
-    async def run():
+    try:
         # Read video IDs
-        video_ids = await YTBulkCLI.read_video_ids(Path(csv_file), id_column)
+        video_ids = YTBulkCLI.read_video_ids(Path(csv_file), id_column)
         total = len(video_ids)
         
         if total == 0:
@@ -129,18 +131,48 @@ def main(
             click.echo("No video IDs found in input file", err=True)
             return
 
-        try:
-            await downloader.process_video_list(
-                video_ids,
+        # Get list of unprocessed videos
+        to_process = storage_manager.list_unprocessed_videos(
+            video_ids,
+            audio=audio,
+            video=video
+        )
+        
+        already_processed = total - len(to_process)
+        
+        if not to_process:
+            logging.info("All videos already processed")
+            return
+
+        logging.info(f"Found {len(to_process)} videos to process out of {total} total")
+
+        # Create progress bar and lock
+        progress_bar = tqdm(total=len(to_process), 
+                          initial=0, 
+                          desc="Processing videos",
+                          unit="video")
+        progress_lock = Lock()
+
+        # Process videos with ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=config.max_concurrent) as executor:
+            process_func = partial(
+                process_video_with_progress,
+                downloader=downloader,
+                progress_bar=progress_bar,
+                progress_lock=progress_lock,
                 download_video=video,
                 download_audio=audio
             )
-        except Exception as e:
-            click.echo(f"\nError: {e}", err=True)
-            raise
+            results = list(executor.map(process_func, to_process))
 
-    try:
-        asyncio.run(run())
+        # Close progress bar
+        progress_bar.close()
+
+        # Log results
+        success_count = sum(1 for r in results if r)
+        logging.info(f"Successfully processed {success_count} out of {len(to_process)} videos")
+        click.echo(f"\nSuccessfully processed {success_count} out of {len(to_process)} videos")
+
     except KeyboardInterrupt:
         logging.info("Download interrupted by user")
         click.echo("\nDownload interrupted by user")
