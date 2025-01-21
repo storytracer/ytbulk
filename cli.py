@@ -111,7 +111,8 @@ def main(
     
     storage_manager = YTBulkStorage(
         work_dir=Path(work_dir),
-        bucket=bucket
+        bucket=bucket,
+        max_concurrent_requests=config.max_concurrent
     )
     
     downloader = YTBulkDownloader(

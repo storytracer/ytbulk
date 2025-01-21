@@ -1,20 +1,29 @@
-# storage.py
 import boto3
 import json
 import logging
 from pathlib import Path
 from typing import Dict, Set, List
 from botocore.exceptions import ClientError
+from botocore.config import Config
 
 class YTBulkStorage:
     """Handles working directory and S3 storage operations."""
     
-    def __init__(self, work_dir: Path, bucket: str):
+    def __init__(self, work_dir: Path, bucket: str, max_concurrent_requests: int):
         self.work_dir = Path(work_dir)
         self.cache_dir = self.work_dir / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.bucket = bucket
+        
+        # Create config with max pool connections
+        self.config = Config(
+            max_pool_connections=max_concurrent_requests * 4
+        )
+        
+        # Initialize session and create configured client
         self.session = boto3.Session()
+        self._s3_client = self.session.client("s3", config=self.config)
+        
         self.downloads_prefix = "downloads"
         self.downloads_dir = self.work_dir / self.downloads_prefix
         self.downloads_dir.mkdir(parents=True, exist_ok=True)
@@ -44,8 +53,7 @@ class YTBulkStorage:
     def list_s3_files(self) -> Set[str]:
         """Get set of all files currently in S3 downloads directory."""
         try:
-            s3 = self.session.client("s3")
-            paginator = s3.get_paginator('list_objects_v2')
+            paginator = self._s3_client.get_paginator('list_objects_v2')
             all_files = set()
             
             for page in paginator.paginate(Bucket=self.bucket, Prefix=self.downloads_prefix):
@@ -103,13 +111,11 @@ class YTBulkStorage:
         video_dir = self.get_work_path(channel_id, video_id, "")
         
         try:
-            s3 = self.session.client("s3")
-            
             # Upload all files that start with video_id
             for file_path in video_dir.iterdir():
                 if file_path.name.startswith(video_id):
                     s3_key = self.get_s3_key(channel_id, video_id, file_path.name)
-                    s3.upload_file(str(file_path), self.bucket, s3_key)
+                    self._s3_client.upload_file(str(file_path), self.bucket, s3_key)
                     file_path.unlink()  # Remove after successful upload
 
             # Clean up empty directory
