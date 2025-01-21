@@ -148,9 +148,11 @@ def main(
 
         # Create progress bar and lock
         progress_bar = tqdm(total=total, 
-                          initial=already_processed, 
-                          desc="Processing videos",
-                          unit="video")
+                          initial=already_processed,
+                          ncols=75,
+                          smoothing=0,
+                          desc="Download",
+                          unit="file")
         progress_lock = Lock()
 
         # Process videos with ThreadPoolExecutor

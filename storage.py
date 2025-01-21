@@ -17,7 +17,7 @@ class YTBulkStorage:
         
         # Create config with max pool connections
         self.config = Config(
-            max_pool_connections=max_concurrent_requests * 4
+            max_pool_connections=max_concurrent_requests
         )
         
         # Initialize session and create configured client
