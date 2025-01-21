@@ -185,7 +185,7 @@ class YTBulkProxyManager:
                         return True, proxy_url
             except Exception as e:
                 error_msg = str(e).lower()
-                if "not a bot" in error_msg or "403" in error_msg:
+                if any(error_pattern in error_msg for error_pattern in ("not a bot", "403")):
                     logging.info(f"Marking proxy {proxy_url} as bad: {e}")
                     self._mark_proxy_bad(proxy_url)
                 else:
