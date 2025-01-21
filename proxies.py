@@ -1,133 +1,98 @@
 # proxies.py
 import json
 import logging
-import time
 import random
+import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Set
 from dataclasses import dataclass
+from typing import Optional, Dict, Set
+from threading import Lock
+from tempfile import TemporaryDirectory
+from enum import Enum
+from tqdm import tqdm
 import requests
 import yt_dlp
-from threading import Lock
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import YTBulkConfig
 from storage import YTBulkStorage
 
+class ProxyState(str, Enum):
+    """Proxy operational states."""
+    UNTESTED = "untested"
+    VERIFIED = "verified"  # Working with good speed
+    WORKING = "working"    # Working but below speed threshold
+    FAILED = "failed"      # Not working
+
 @dataclass
 class ProxyStatus:
-    """Simple proxy status tracking."""
+    """Status and performance metrics for a proxy."""
     url: str
-    is_good: bool = False
+    state: ProxyState = ProxyState.UNTESTED
     download_speed: Optional[float] = None  # Speed in MB/s
-
+    last_tested: float = 0.0
 
 class YTBulkProxyManager:
+    """Manages a pool of proxies with persistent status tracking."""
+    
     def __init__(self, config: YTBulkConfig, work_dir: Path, max_concurrent_requests: int):
-        self.work_dir = work_dir
-        self.proxy_list_url = config.proxy_list_url
+        self.config = config
         self.status_file = work_dir / "cache" / "proxies.json"
-        self.test_video_id = config.test_video
-        self.max_concurrent_requests = max_concurrent_requests
-        self.proxy_lock = Lock()
-
         self.status_file.parent.mkdir(parents=True, exist_ok=True)
-        self.good_proxies: Set[str] = set()
-        self.bad_proxies: Set[str] = set()
-        self.untested_proxies: Set[str] = set()
+        self.max_concurrent = max_concurrent_requests
+        self.proxy_lock = Lock()
+        
+        # Single source of truth for proxy status
+        self.status_cache: Dict[str, ProxyStatus] = {}
+        
+        # Start proxy initialization
+        self._initialize_proxies()
 
-        self.initialize_proxies()
-
-    def initialize_proxies(self):
-        """Load and test the initial set of proxies."""
-        with self.proxy_lock:
-            self.untested_proxies = set(self._load_proxy_list())
-            status = self._load_proxy_status()
-
-            # Initialize sets based on previous status
-            for proxy, proxy_status in status.items():
-                if proxy in self.untested_proxies:
-                    self.untested_proxies.remove(proxy)
-                    if proxy_status["is_good"]:
-                        self.good_proxies.add(proxy)
-                    else:
-                        self.bad_proxies.add(proxy)
-
-            # Test random proxies if more good ones are needed
-            while len(self.good_proxies) < self.max_concurrent_requests and self.untested_proxies:
-                proxy = random.choice(list(self.untested_proxies))
-                self.untested_proxies.remove(proxy)
-                
-                status[proxy] = self._test_and_save_status(proxy)
-                if status[proxy]["is_good"]:
-                    self.good_proxies.add(proxy)
-
-            # If we still don't have enough good proxies and have more to test, continue testing
-            if len(self.good_proxies) < self.max_concurrent_requests and (self.untested_proxies or self.bad_proxies):
-                return True  # Signal that we should continue testing
-            return False  # Signal that we're done testing
-
-    def _load_proxy_list(self) -> List[str]:
-        """Fetch the proxy list from the remote URL."""
-        response = requests.get(self.proxy_list_url)
-        if response.status_code != 200:
-            raise Exception(f"Failed to fetch proxy list: {response.status_code}")
-        return list(set(line.strip() for line in response.text.splitlines() if line.strip()))
-
-    def _load_proxy_status(self) -> Dict[str, Dict[str, Optional[float]]]:
-        """Load proxy statuses from the local file."""
-        if self.status_file.exists():
-            with open(self.status_file) as f:
-                return json.load(f)
+    def _load_status_file(self) -> Dict[str, Dict]:
+        """Load proxy status from file with error handling."""
+        try:
+            if self.status_file.exists():
+                with open(self.status_file) as f:
+                    return json.load(f)
+        except Exception as e:
+            logging.error(f"Error loading proxy status file: {e}")
         return {}
 
-    def _save_proxy_status(self, status: Dict[str, Dict[str, Optional[float]]]):
-        """Save proxy statuses to the local file."""
-        with open(self.status_file, "w") as f:
-            json.dump(status, f, indent=2)
+    def _save_status_file(self) -> None:
+        """Save proxy status to file with error handling."""
+        try:
+            status_dict = {
+                proxy: {
+                    "state": status.state.value,
+                    "download_speed": status.download_speed,
+                    "last_tested": status.last_tested
+                }
+                for proxy, status in self.status_cache.items()
+            }
+            with open(self.status_file, "w") as f:
+                json.dump(status_dict, f, indent=2)
+        except Exception as e:
+            logging.error(f"Error saving proxy status file: {e}")
 
-    def get_working_proxy(self) -> Optional[str]:
-        """Return a randomly selected good proxy, testing more if needed."""
-        with self.proxy_lock:
-            while not self.good_proxies and self.untested_proxies:
-                logging.info("Testing more proxies...")
-                status = self._load_proxy_status()
+    def _fetch_proxy_list(self) -> Set[str]:
+        """Fetch and validate current proxy list."""
+        try:
+            response = requests.get(self.config.proxy_list_url)
+            response.raise_for_status()
+            return {line.strip() for line in response.text.splitlines() if line.strip()}
+        except Exception as e:
+            logging.error(f"Error fetching proxy list: {e}")
+            return set()
 
-                # Try untested proxies
-                proxy = random.choice(list(self.untested_proxies))
-                self.untested_proxies.remove(proxy)
-
-                status[proxy] = self._test_and_save_status(proxy)
-                if status[proxy]["is_good"]:
-                    self.good_proxies.add(proxy)
-
-                self._save_proxy_status(status)
-
-        with self.proxy_lock:
-            if not self.good_proxies:
-                logging.error("No working proxies available.")
-                return None
-
-            # Randomly select a good proxy
-            return random.choice(list(self.good_proxies))
-
-    def _test_and_save_status(self, proxy_url: str) -> Dict[str, Optional[float]]:
-        """Test a proxy and return its status."""
-        is_good, speed = self._test_proxy(proxy_url)
-        return {"is_good": is_good, "download_speed": speed}
-
-    def _test_proxy(self, proxy_url: str) -> Tuple[bool, Optional[float]]:
-        """Test a proxy by downloading a YouTube video."""
-        from tempfile import TemporaryDirectory
-
-        download_start_time = [None]
-        bytes_downloaded = [0]
-
+    def _test_proxy(self, proxy_url: str) -> ProxyStatus:
+        """Test proxy performance and reliability using isolated temp directory."""
+        status = ProxyStatus(url=proxy_url, last_tested=time.time())
+        
         def progress_hook(d):
             if d["status"] == "downloading":
-                if download_start_time[0] is None:
-                    download_start_time[0] = time.time()
-                bytes_downloaded[0] = d.get("downloaded_bytes", 0)
+                if not hasattr(progress_hook, "start_time"):
+                    progress_hook.start_time = time.time()
+                    progress_hook.bytes_downloaded = 0
+                progress_hook.bytes_downloaded = d.get("downloaded_bytes", 0)
 
         with TemporaryDirectory() as temp_dir:
             ydl_opts = {
@@ -135,70 +100,155 @@ class YTBulkProxyManager:
                 "no_warnings": True,
                 "proxy": proxy_url,
                 "format": "worst",
-                "outtmpl": str(Path(temp_dir) / "%(id)s.%(ext)s"),
                 "progress_hooks": [progress_hook],
+                "outtmpl": str(Path(temp_dir) / "%(id)s.%(ext)s"),
+                "noprogress": True
             }
 
-        with TemporaryDirectory() as temp_dir:
-            ydl_opts["outtmpl"] = str(Path(temp_dir) / "%(id)s.%(ext)s")
-            
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([f"https://www.youtube.com/watch?v={self.test_video_id}"])
+                    ydl.download([f"https://www.youtube.com/watch?v={self.config.test_video}"])
 
-                if download_start_time[0] is None:
-                    logging.warning(f"No download progress tracked for proxy {proxy_url}.")
-                    return False, None
+                if hasattr(progress_hook, "start_time"):
+                    elapsed = time.time() - progress_hook.start_time
+                    status.download_speed = (progress_hook.bytes_downloaded / (1024 * 1024)) / elapsed
+                    if status.download_speed >= self.config.proxy_min_speed:
+                        status.state = ProxyState.VERIFIED
+                    else:
+                        status.state = ProxyState.WORKING
+                return status
 
-                elapsed_time = time.time() - download_start_time[0]
-                download_speed = (bytes_downloaded[0] / (1024 * 1024)) / elapsed_time  # Speed in MB/s
-
-                if download_speed >= 1.0:
-                    logging.info(f"Proxy {proxy_url} passed with speed {download_speed:.2f} MB/s.")
-                    return True, download_speed
-                else:
-                    logging.info(f"Proxy {proxy_url} failed due to low speed: {download_speed:.2f} MB/s.")
-                    return False, download_speed
             except Exception as e:
-                logging.debug(f"Proxy {proxy_url} test failed: {e}")
-                return False, None
+                logging.debug(f"Proxy test failed - {proxy_url}: {e}")
+                status.state = ProxyState.FAILED
+                return status
 
-    def download_with_proxy(
-        self, video_id: str, ydl_opts: dict, storage_manager: YTBulkStorage
-    ) -> Tuple[bool, Optional[str]]:
-        """Attempt to download using a randomly selected working proxy."""
+    def _initialize_proxies(self) -> None:
+        """Initialize and test proxies with persistent state management."""
+        with self.proxy_lock:
+            # Load current state
+            current_proxies = self._fetch_proxy_list()
+            saved_status = self._load_status_file()
+            
+            # Load previous states for ordering
+            proxy_states = {}
+            for proxy, data in saved_status.items():
+                if proxy in current_proxies:
+                    proxy_states[proxy] = ProxyState(data.get("state", ProxyState.UNTESTED.value))
+            
+            # Mark any new proxies as untested
+            for proxy in current_proxies:
+                if proxy not in proxy_states:
+                    proxy_states[proxy] = ProxyState.UNTESTED
+
+            # Order proxies for testing based on previous state
+            to_test = [
+                proxy for proxy in current_proxies
+                if proxy_states[proxy] == ProxyState.WORKING
+            ]
+            
+            untested = [
+                proxy for proxy in current_proxies
+                if proxy_states[proxy] == ProxyState.UNTESTED
+            ]
+            random.shuffle(untested)
+            to_test.extend(untested)
+            
+            to_test.extend(
+                proxy for proxy in current_proxies
+                if proxy_states[proxy] == ProxyState.VERIFIED
+            )
+            to_test.extend(
+                proxy for proxy in current_proxies
+                if proxy_states[proxy] == ProxyState.FAILED
+            )
+
+        # Test proxies sequentially
+        if to_test:
+            # Track only newly tested proxies in progress bar
+            state_counts = {state: 0 for state in ProxyState}
+
+            def get_description():
+                return f"Testing [V:{state_counts[ProxyState.VERIFIED]} W:{state_counts[ProxyState.WORKING]} F:{state_counts[ProxyState.FAILED]}]"
+
+            pbar = tqdm(
+                total=len(to_test),
+                initial=0,
+                desc=get_description(),
+                ncols=75,
+            )
+
+            for proxy in to_test:
+                try:
+                    status = self._test_proxy(proxy)
+                    with self.proxy_lock:
+                        self.status_cache[proxy] = status
+                        state_counts[status.state] += 1
+                        self._save_status_file()
+                        pbar.set_description_str(get_description())
+                        pbar.update(1)
+                        
+                        if self._count_usable_proxies() >= self.max_concurrent:
+                            break
+                except Exception as e:
+                    logging.error(f"Error testing proxy {proxy}: {e}")
+                    state_counts[ProxyState.FAILED] += 1
+                    pbar.set_description_str(get_description())
+                    pbar.update(1)
+
+            pbar.close()
+
+    def _count_usable_proxies(self) -> int:
+        """Count proxies that are either verified or working."""
+        return sum(
+            1 for status in self.status_cache.values()
+            if status.state in (ProxyState.VERIFIED, ProxyState.WORKING)
+        )
+
+    def get_working_proxy(self) -> Optional[str]:
+        """Get a verified proxy if available, otherwise a working proxy."""
+        with self.proxy_lock:
+            if self._count_usable_proxies() == 0 and (self.status_cache or self._fetch_proxy_list()):
+                self._initialize_proxies()
+            
+            # Try verified proxies first
+            for proxy, status in self.status_cache.items():
+                if status.state == ProxyState.VERIFIED:
+                    return proxy
+            
+            # Fall back to working proxies
+            for proxy, status in self.status_cache.items():
+                if status.state == ProxyState.WORKING:
+                    return proxy
+            
+            return None
+
+    def _mark_proxy_failed(self, proxy_url: str) -> None:
+        """Mark a proxy as failed and update persistent state."""
+        with self.proxy_lock:
+            if proxy_url in self.status_cache:
+                status = self.status_cache[proxy_url]
+                status.state = ProxyState.FAILED
+                status.last_tested = time.time()
+                self._save_status_file()
+
+    def download_with_proxy(self, video_id: str, ydl_opts: dict, storage_manager: YTBulkStorage) -> bool:
+        """Download video using proxy with automatic failover."""
         while True:
             proxy_url = self.get_working_proxy()
             if not proxy_url:
-                logging.error("No working proxies available.")
-                return False, None
+                logging.error("No working proxies available")
+                return False
 
             ydl_opts["proxy"] = proxy_url
-
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=True)
-                    if not info:
-                        raise Exception("Download failed")
-
-                    if storage_manager.finalize_video(info):
-                        return True, proxy_url
+                    if info and storage_manager.finalize_video(info):
+                        return True
+                    raise Exception("Download or finalization failed")
             except Exception as e:
-                error_msg = str(e).lower()
-                if any(error_pattern in error_msg for error_pattern in ("not a bot", "403")):
-                    logging.info(f"Marking proxy {proxy_url} as bad: {e}")
-                    self._mark_proxy_bad(proxy_url)
-                else:
-                    logging.error(f"Download error with proxy {proxy_url}: {e}")
-                return False, None
-
-    def _mark_proxy_bad(self, proxy_url: str):
-        """Mark a proxy as bad and permanently remove it."""
-        with self.proxy_lock:
-            status = self._load_proxy_status()
-            status[proxy_url] = {"is_good": False, "download_speed": None}
-            self._save_proxy_status(status)
-            self.good_proxies.discard(proxy_url)
-            self.bad_proxies.add(proxy_url)
-            # Remove from untested list to ensure it won't be retried
-            self.untested_proxies.discard(proxy_url)
+                self._mark_proxy_failed(proxy_url)
+                if self._count_usable_proxies() == 0:
+                    logging.error("All proxies exhausted")
+                    return False

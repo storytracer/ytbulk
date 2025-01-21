@@ -21,6 +21,7 @@ class YTBulkConfig:
         
         # Proxy settings
         self.proxy_list_url = os.getenv("YTBULK_PROXY_LIST_URL")  # Required
+        self.proxy_min_speed = float(os.getenv("YTBULK_PROXY_MIN_SPEED", "1.0"))  # MB/s
         
         # Download preferences
         self.default_resolution = YTBulkResolution(
@@ -34,6 +35,7 @@ class YTBulkConfig:
             self.chunk_size > 0,
             self.max_retries > 0,
             self.error_threshold > 0,
+            self.proxy_min_speed > 0,
             isinstance(self.default_resolution, YTBulkResolution)
         ])
 
@@ -43,17 +45,9 @@ class YTBulkConfig:
             raise ValueError("YTBULK_MAX_RETRIES must be positive")
         if self.error_threshold <= 0:
             raise ValueError("YTBULK_ERROR_THRESHOLD must be positive")
+        if self.proxy_min_speed <= 0:
+            raise ValueError("YTBULK_PROXY_MIN_SPEED must be positive")
         if not self.proxy_list_url:
             raise ValueError("YTBULK_PROXY_LIST_URL is required")
         if not self.test_video:
             raise ValueError("YTBULK_TEST_VIDEO is required")
-
-    def as_dict(self) -> Dict:
-        """Return configuration as dictionary."""
-        return {
-            "chunk_size": self.chunk_size,
-            "max_retries": self.max_retries,
-            "error_threshold": self.error_threshold,
-            "proxy_min_speed": self.proxy_min_speed,
-            "default_resolution": self.default_resolution.value
-        }
